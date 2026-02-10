@@ -1,7 +1,6 @@
 import { initializeApp, getApps } from "firebase/app";
-import { getAuth, signInAnonymously } from "firebase/auth";
+import { getAuth } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
-import { getStorage } from "firebase/storage";
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -12,14 +11,11 @@ const firebaseConfig = {
   appId: import.meta.env.VITE_FIREBASE_APP_ID,
 };
 
+// aynı anda 2 kere initialize etmesin diye:
 const app = getApps().length ? getApps()[0] : initializeApp(firebaseConfig);
 
 export const auth = getAuth(app);
 export const db = getFirestore(app);
-export const storage = getStorage(app);
 
-export async function ensureAnonAuth() {
-  if (!auth.currentUser) {
-    await signInAnonymously(auth);
-  }
-}
+// senin koleksiyon yolunda kullandığın id:
+export const appId = "ikk-yarisma";
