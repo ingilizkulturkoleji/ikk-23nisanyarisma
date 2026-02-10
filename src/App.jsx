@@ -1,4 +1,22 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { initializeApp } from "firebase/app";
+import {
+  getFirestore,
+  collection,
+  addDoc,
+  getDocs,
+  query,
+  orderBy,
+  where,
+  serverTimestamp,
+} from "firebase/firestore";
+import {
+  getAuth,
+  signInAnonymously,
+  onAuthStateChanged,
+} from "firebase/auth";
+import { getStorage, ref, uploadBytes, getDownloadURL } from "firebase/storage";
+
 import {
   Upload,
   CheckCircle,
@@ -23,44 +41,87 @@ import {
   Youtube,
   Linkedin,
   Twitter,
-  Globe
+  Globe,
+  FileImage,
+  File,
 } from "lucide-react";
 
-import { collection, addDoc, getDocs, query, orderBy, serverTimestamp } from "firebase/firestore";
-import { signInAnonymously, onAuthStateChanged } from "firebase/auth";
-import { ref as storageRef, uploadBytes, getDownloadURL } from "firebase/storage";
+/* =========================
+   ENV (Vercel)
+========================= */
+const firebaseConfig = {
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID,
+};
 
-import { auth, db, storage, appId, geminiApiKey } from "./firebase.js";
+const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
 
-/* --- GÖRSEL VE İÇERİK TANIMLARI --- */
+/* =========================
+   Firebase Init
+========================= */
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const storage = getStorage(app);
+
+// Firestore path
+const APP_ID = "ikk-yarisma";
+const SUBMISSIONS_COL = collection(db, "artifacts", APP_ID, "public", "data", "submissions");
+
+/* =========================
+   Assets / Constants
+========================= */
 const LOGO_URL = "https://i.ibb.co/zHJ5f7bd/ikk-LOGO-PNG.png";
-const SEAL_URL =
-  "https://i.ibb.co/7xtJHgHX/Gemini-Generated-mage-m6wzg8m6wzg8m6wz-removebg-preview.png";
+const SEAL_URL = "https://i.ibb.co/7xtJHgHX/Gemini-Generated-mage-m6wzg8m6wzg8m6wz-removebg-preview.png";
 const SIGNATURE_URL = "https://i.ibb.co/DD6G3YfM/g-rhanimza.png";
 const PRINCIPAL_NAME = "Gürhan Keskin";
 
-/* --- YARDIMCI FONKSIYONLAR --- */
-const generateValidationId = () => "IKK-" + Math.random().toString(36).slice(2, 10).toUpperCase();
+// Admin creds (UI’da gösterilmez)
+const ADMIN_USER = "ikkdijital";
+const ADMIN_PASS = "ikk2026";
 
-/* --- GEMINI ANALİZ --- */
+/* =========================
+   Helpers
+========================= */
+const generateValidationId = () => "IKK-" + Math.random().toString(36).slice(2, 11).toUpperCase();
+
+const normalizePhone = (raw = "") => {
+  const digits = String(raw).replace(/\D/g, "");
+  // 90 ile başlıyorsa kırpma (isteğe bağlı). Biz sadece standartlaştırıyoruz:
+  // 0 ile başlıyorsa 0'ı koruyalım; önemli olan aynı girilse bile aynı normalize olması.
+  return digits;
+};
+
+const normalizeName = (raw = "") =>
+  String(raw).trim().toLocaleLowerCase("tr-TR").replace(/\s+/g, " ");
+
+const getFileIcon = (name = "") => {
+  const ext = name.split(".").pop()?.toLowerCase();
+  if (["jpg", "jpeg", "png", "webp", "gif", "bmp", "heic"].includes(ext)) return <FileImage size={14} />;
+  if (["pdf", "doc", "docx", "txt"].includes(ext)) return <FileText size={14} />;
+  return <File size={14} />;
+};
+
+// Gemini: yalnızca resimler için (senin ilk kurguna uygun)
 const analyzeWithGemini = async (file) => {
   if (!file) return "Dosya Yok";
+  if (!file.type?.startsWith("image/")) return "Format Desteklenmiyor (Manuel Kontrol)";
+  if (!GEMINI_API_KEY) return "API Anahtarı Yok (Manuel Kontrol)";
 
-  const isImage = file.type?.startsWith("image/");
-  if (!isImage) return "Format Desteklenmiyor (Manuel Kontrol)";
-
-  if (!geminiApiKey) return "API Key Yok (Manuel Kontrol)";
+  const base64Data = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onload = () => resolve(String(reader.result).split(",")[1]);
+    reader.onerror = reject;
+  });
 
   try {
-    const base64Data = await new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.readAsDataURL(file);
-      reader.onload = () => resolve(String(reader.result).split(",")[1]);
-      reader.onerror = reject;
-    });
-
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${geminiApiKey}`,
+    const resp = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${GEMINI_API_KEY}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -70,43 +131,55 @@ const analyzeWithGemini = async (file) => {
               parts: [
                 {
                   text:
-                    "Sen bir resim yarışması jürisisin. Bu görselin bir ilkokul/ortaokul öğrencisi tarafından geleneksel yöntemlerle (boya, kalem vs.) mi yapıldığını yoksa Yapay Zeka (AI) tarafından mı üretildiğini analiz et. Yanıtını KESİNLİKLE sadece şu formatta ver: '%[0-100 ARASI RAKAM] ([DURUM])'. Durumlar: 'Temiz', 'Şüpheli', 'AI Üretimi'. Örnek: '%10 (Temiz)' veya '%95 (AI Üretimi)'."
+                    "Sen bir resim yarışması jürisisin. Bu görselin bir ilkokul/ortaokul öğrencisi tarafından geleneksel yöntemlerle (boya, kalem vs.) mi yapıldığını yoksa Yapay Zeka (AI) tarafından mı üretildiğini analiz et. Yanıtını KESİNLİKLE sadece şu formatta ver: '%[0-100 ARASI RAKAM] ([DURUM])'. Durumlar: 'Temiz', 'Şüpheli', 'AI Üretimi'. Örnek: '%10 (Temiz)' veya '%95 (AI Üretimi)'.",
                 },
-                { inlineData: { mimeType: file.type, data: base64Data } }
-              ]
-            }
-          ]
-        })
+                { inlineData: { mimeType: file.type, data: base64Data } },
+              ],
+            },
+          ],
+        }),
       }
     );
 
-    const data = await res.json();
+    const data = await resp.json();
     const aiResult = data?.candidates?.[0]?.content?.parts?.[0]?.text;
     return aiResult ? String(aiResult).trim() : "Analiz Edilemedi";
   } catch (e) {
-    console.error("Gemini Hatası:", e);
+    console.error("Gemini error:", e);
     return "API Hatası (Manuel Kontrol)";
   }
 };
 
-/* --- CSV --- */
 const downloadCSV = (data) => {
   const BOM = "\uFEFF";
-  const headers = ["İsim", "Soyisim", "Okul", "Veli Telefon No", "Kategori", "Sınıf", "AI Durumu", "Tarih", "Dosya"];
+  const headers = [
+    "İsim",
+    "Soyisim",
+    "Okul",
+    "Veli Telefon No",
+    "Kategori",
+    "Sınıf",
+    "AI Durumu",
+    "Tarih",
+    "Dosya Adı",
+    "Dosya Linki",
+  ];
+
   const rows = [headers.join(";")];
 
   data.forEach((row) => {
-    const created = row.createdAt?.seconds ? new Date(row.createdAt.seconds * 1000) : new Date();
+    const created = row.createdAt?.seconds ? new Date(row.createdAt.seconds * 1000) : null;
     const rowData = [
       row.studentName,
       row.studentSurname,
       row.school,
       row.parentPhone,
       row.category,
-      `${row.grade}. Sınıf`,
+      row.grade ? `${row.grade}. Sınıf` : "",
       row.aiScore,
-      created.toLocaleDateString("tr-TR"),
-      row.fileName || ""
+      created ? created.toLocaleDateString("tr-TR") : "",
+      row.fileName || "",
+      row.fileUrl || "",
     ];
 
     const escaped = rowData.map((field) => {
@@ -121,53 +194,45 @@ const downloadCSV = (data) => {
   const csvString = BOM + rows.join("\n");
   const blob = new Blob([csvString], { type: "text/csv;charset=utf-8;" });
   const link = document.createElement("a");
-  const url = URL.createObjectURL(blob);
-  link.href = url;
+  link.href = URL.createObjectURL(blob);
   link.download = `ikk_basvurular_${new Date().toLocaleDateString("tr-TR")}.csv`;
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
 };
 
+/* =========================
+   KVKK Component
+========================= */
 const KvkkContent = () => (
   <div className="text-sm text-slate-700 leading-relaxed space-y-4">
+    <p><strong>Değerli İlgili,</strong></p>
     <p>
-      <strong>Değerli İlgili,</strong>
+      6698 Sayılı Kişisel Verilerin Korunması Kanunu (KVKK) kapsamında kişisel verileriniz
+      işlenebilir, paylaşılabilir, muhafaza edilebilir ve gerektiğinde imha edilebilir.
     </p>
     <p>
-      Kişisel verilerin işlenmesinde başta özel hayatın gizliliği olmak üzere kişilerin temel hak ve özgürlüklerini
-      korumak ve kişisel verileri işleyen gerçek ve tüzel kişilerin yükümlülükleri ile uyacakları usul ve esasları
-      düzenlemek amacıyla kabul edilen 6698 Sayılı Kişisel Verilerin Korunması Kanunu (KVKK); 7 Nisan 2016 tarihli Resmi
-      Gazete’de yayınlanmış ve ilgili yürürlük maddesi uyarınca anılan kanunun 8, 9, 11, 13, 14, 15, 16, 17 ve 18.
-      maddeleri 07 Ekim 2016 tarihinden itibaren yürürlüğe girmiştir.
+      <strong>Batıkent İngiliz Kültür Koleji</strong> olarak kişisel verilerin güvenliği için
+      azami özen gösterilmektedir.
     </p>
     <p>
-      KVKK uyarınca, <strong>Batıkent İngiliz Kültür Koleji</strong> olarak; işleme amacı ile bağlantılı, sınırlı ve
-      ölçülü olacak şekilde talep edilen ve/veya bizimle paylaşmış olduğunuz kişisel veriler, yine işlenmelerini
-      gerektiren amaç çerçevesinde işlenebilecek, paylaşılabilecek, muhafaza edilebilecek ve gerektiğinde imha edilebilecek
-      olup kişisel verilerin güvenliği için maksimum özen gösterilmektedir.
-    </p>
-    <p>
-      <strong>Haklarınız (KVKK Madde 11):</strong> Bizimle iletişime geçerek kişisel verilerinizin işlenip işlenmediğini
-      öğrenme, işlenme amacını ve amacına uygun kullanılıp kullanılmadığını öğrenme, yurt içi veya yurt dışında aktarıldığı
-      üçüncü kişileri bilme, eksik veya yanlış işlenen verilerin düzeltilmesini isteme, verilerin silinmesini veya yok
-      edilmesini talep etme haklarına sahipsiniz.
-    </p>
-    <p>
-      https://www.ingilizkultur.com.tr/ adresinde yer alan aydınlatma metnini okudum, anladım. Gerek tarafıma ait olan
-      gerekse de yasal olarak paylaşma hakkını haiz bulunduğum kişilere ait kişisel verilerin yukarıda açıklanan şekilde
-      işlenmesine, saklanmasına, paylaşılmasına ve gerektiğinde imha edilmesine, ayrıca iletişim bilgilerim aracılığıyla
-      tarafımla iletişime geçilmesine onay veriyor ve muvafakat ediyorum.
+      https://www.ingilizkultur.com.tr/ adresinde yer alan aydınlatma metnini okudum, anladım.
+      Kişisel verilerimin belirtilen şekilde işlenmesine onay veriyorum.
     </p>
   </div>
 );
 
-export default function App() {
+/* =========================
+   APP
+========================= */
+export default function IKKCompetitionApp() {
   const [user, setUser] = useState(null);
   const [view, setView] = useState("landing");
   const [submissionData, setSubmissionData] = useState(null);
+
   const [loading, setLoading] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState("");
+
   const [isAdmin, setIsAdmin] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
@@ -176,17 +241,16 @@ export default function App() {
       try {
         await signInAnonymously(auth);
       } catch (e) {
-        console.error("Auth init failed:", e);
+        console.error("Auth error:", e);
       }
     };
     init();
-
     const unsub = onAuthStateChanged(auth, (u) => setUser(u));
     return () => unsub();
   }, []);
 
   const handleAdminLogin = (username, password) => {
-    if (username === "ikkadmin" && password === "2026") {
+    if (username === ADMIN_USER && password === ADMIN_PASS) {
       setIsAdmin(true);
       setView("adminDashboard");
     } else {
@@ -194,84 +258,107 @@ export default function App() {
     }
   };
 
-  // ✅ DOSYA YÜKLE + URL KAYDET (kritik fix)
   const handleSubmission = async (formData) => {
     if (!user) {
-      alert("Oturum açılıyor, lütfen bekleyip tekrar deneyin.");
+      alert("Oturum açılıyor, lütfen tekrar deneyin.");
       return;
     }
 
+    // Duplicate check (aynı ad+soyad + aynı telefon)
+    const phoneNorm = normalizePhone(formData.parentPhone);
+    const nameNorm = normalizeName(formData.studentName);
+    const surnameNorm = normalizeName(formData.studentSurname);
+
     setLoading(true);
-    setLoadingMessage("Dosyanız yükleniyor ve Gemini AI ile analiz ediliyor...");
+    setLoadingMessage("Başvuru kontrol ediliyor...");
 
-    // 1) Gemini
+    try {
+      // Sadece telefon ile query (index istemez). Sonra isimle JS içinde doğrula.
+      const qPhone = query(SUBMISSIONS_COL, where("parentPhoneNorm", "==", phoneNorm));
+      const snap = await getDocs(qPhone);
+      const exists = snap.docs.some((d) => {
+        const x = d.data();
+        return (
+          normalizeName(x.studentName) === nameNorm &&
+          normalizeName(x.studentSurname) === surnameNorm
+        );
+      });
+
+      if (exists) {
+        setLoading(false);
+        alert("Bu öğrenci için (aynı ad/soyad ve aynı telefon) daha önce başvuru yapılmış.");
+        return;
+      }
+    } catch (e) {
+      console.error("Duplicate check error:", e);
+      // check başarısız olsa bile başvuruya izin vermek istemiyorsan burada return yapabilirsin
+    }
+
+    // Gemini
+    setLoadingMessage("Dosyanız analiz ediliyor (Gemini)...");
+
     let aiScoreResult = "Analiz Bekleniyor";
-    if (formData.file) aiScoreResult = await analyzeWithGemini(formData.file);
-    else aiScoreResult = "Dosya Yok";
+    try {
+      aiScoreResult = await analyzeWithGemini(formData.file);
+    } catch {
+      aiScoreResult = "Hata (Manuel)";
+    }
 
-    // 2) ID
-    const validationId = generateValidationId();
-
-    // 3) Storage upload
+    // Storage upload
     setLoadingMessage("Dosya güvenli alana yükleniyor...");
 
     let fileUrl = "";
-    let filePath = "";
-    let fileType = "";
-    let fileName = formData.fileName || "";
+    let storagePath = "";
+    let fileName = formData.file?.name || "";
+    let fileType = formData.file?.type || "";
 
-    if (formData.file) {
-      try {
-        fileName = formData.file.name;
-        fileType = formData.file.type || "";
-        filePath = `submissions/${user.uid}/${validationId}_${fileName}`;
-
-        const ref = storageRef(storage, filePath);
-        await uploadBytes(ref, formData.file);
-        fileUrl = await getDownloadURL(ref);
-      } catch (e) {
-        console.error("Storage upload hatası:", e);
-        alert("Dosya yüklenemedi. Lütfen tekrar deneyin.");
-        setLoading(false);
-        return;
+    try {
+      if (formData.file) {
+        const safeName = `${Date.now()}_${fileName}`.replace(/\s+/g, "_");
+        storagePath = `submissions/${user.uid}/${safeName}`;
+        const fileRef = ref(storage, storagePath);
+        await uploadBytes(fileRef, formData.file);
+        fileUrl = await getDownloadURL(fileRef);
       }
+    } catch (e) {
+      console.error("Storage upload error:", e);
+      setLoading(false);
+      alert("Dosya yükleme sırasında hata oluştu. Lütfen tekrar deneyin.");
+      return;
     }
 
-    // 4) Firestore save
-    setLoadingMessage("Sonuçlar kaydediliyor ve sertifikanız oluşturuluyor...");
+    setLoadingMessage("Sonuçlar kaydediliyor ve sertifika hazırlanıyor...");
 
     const finalData = {
       studentName: formData.studentName,
       studentSurname: formData.studentSurname,
       school: formData.school,
       grade: formData.grade,
-      parentPhone: formData.parentPhone,
       category: formData.category,
+      parentPhone: formData.parentPhone,
+      parentPhoneNorm: phoneNorm,
 
+      validationId: generateValidationId(),
       userId: user.uid,
-      validationId,
       createdAt: serverTimestamp(),
-      aiScore: aiScoreResult,
       status: "İnceleniyor",
+      aiScore: aiScoreResult,
 
       fileName,
       fileType,
-      filePath,
+      storagePath,
       fileUrl,
-
-      aiConsent: !!formData.aiConsent,
-      instagramFollow: !!formData.instagramFollow
     };
 
     try {
-      await addDoc(collection(db, "artifacts", appId, "public", "data", "submissions"), finalData);
+      await addDoc(SUBMISSIONS_COL, finalData);
       setSubmissionData(finalData);
       setLoading(false);
       setView("certificate");
     } catch (e) {
-      console.error("Firestore kayıt hatası:", e);
-      alert(`Başvuru sırasında bir hata oluştu: ${e.message}`);
+      console.error("Firestore add error:", e);
       setLoading(false);
+      alert("Başvuru kaydedilirken hata oluştu. Lütfen tekrar deneyin.");
     }
   };
 
@@ -282,7 +369,13 @@ export default function App() {
       case "form":
         return <ApplicationForm onSubmit={handleSubmission} onBack={() => setView("landing")} />;
       case "certificate":
-        return <Certificate data={submissionData} onPrint={() => window.print()} onNew={() => setView("landing")} />;
+        return (
+          <Certificate
+            data={submissionData}
+            onPrint={() => window.print()}
+            onNew={() => setView("landing")}
+          />
+        );
       case "contact":
         return <ContactPage onBack={() => setView("landing")} />;
       case "adminLogin":
@@ -306,14 +399,13 @@ export default function App() {
       <header className="bg-white shadow-md sticky top-0 z-50">
         <div className="container mx-auto px-4 py-3 md:py-4 flex justify-between items-center">
           <div className="flex items-center space-x-4 cursor-pointer" onClick={() => setView("landing")}>
-            <div className="w-16 h-16 md:w-24 md:h-24 bg-white rounded-full flex items-center justify-center text-white font-bold text-lg md:text-xl shadow-lg overflow-hidden border-2 border-slate-100">
+            <div className="w-16 h-16 md:w-24 md:h-24 bg-white rounded-full flex items-center justify-center shadow-lg overflow-hidden border-2 border-slate-100">
               <img
                 src={LOGO_URL}
                 alt="İKK"
                 className="w-full h-full object-contain p-1"
                 onError={(e) => {
                   e.currentTarget.style.display = "none";
-                  e.currentTarget.parentElement.innerText = "İKK";
                 }}
               />
             </div>
@@ -401,22 +493,25 @@ export default function App() {
           </div>
           <p className="opacity-80 text-lg font-bold">© 2026 İngiliz Kültür Kolejleri</p>
           <p className="text-sm opacity-60 mt-1">Tüm Hakları Saklıdır.</p>
-          <p className="text-xs md:text-sm opacity-50 mt-4">23 Nisan Ulusal Egemenlik ve Çocuk Bayramı Özel Projesi</p>
+          <p className="text-xs md:text-sm opacity-50 mt-4">
+            23 Nisan Ulusal Egemenlik ve Çocuk Bayramı Özel Projesi
+          </p>
         </div>
       </footer>
     </div>
   );
 }
 
-/* ----------------- İLETİŞİM ----------------- */
+/* =========================
+   Contact
+========================= */
 function ContactPage({ onBack }) {
   return (
     <div className="max-w-4xl mx-auto space-y-8 animate-in fade-in slide-in-from-bottom-5 duration-500">
       <div className="text-center space-y-2">
         <h2 className="text-3xl md:text-4xl font-extrabold text-blue-900">İletişim</h2>
         <p className="text-slate-600 max-w-xl mx-auto">
-          Sorularınız ve önerileriniz için bizimle iletişime geçebilir, sosyal medya hesaplarımızdan bizi takip
-          edebilirsiniz.
+          Sorularınız ve önerileriniz için bizimle iletişime geçebilir, sosyal medya hesaplarımızdan bizi takip edebilirsiniz.
         </p>
       </div>
 
@@ -457,7 +552,7 @@ function ContactPage({ onBack }) {
             <a
               href="https://ingilizkultur.com.tr"
               target="_blank"
-              rel="noopener noreferrer"
+              rel="noreferrer"
               className="flex items-center justify-center w-full py-3 bg-slate-800 text-white rounded-xl hover:bg-slate-900 transition gap-2"
             >
               <Globe size={18} /> Web Sitemiz
@@ -469,6 +564,7 @@ function ContactPage({ onBack }) {
           <h3 className="text-xl font-bold text-blue-900 mb-6 flex items-center gap-2">
             <Instagram className="text-pink-600" /> Bizi Takip Edin
           </h3>
+
           <div className="space-y-3">
             <SocialButton
               icon={<Instagram />}
@@ -483,7 +579,12 @@ function ContactPage({ onBack }) {
               color="bg-blue-600"
               link="https://www.facebook.com/people/Bat%C4%B1kent%C4%B0ngilizk%C3%BClt%C3%BCrkolej/100091627883847/"
             />
-            <SocialButton icon={<Youtube />} label="YouTube" color="bg-red-600" link="https://www.youtube.com/channel/UCfXAdaM-ZwO4rlIwQEh0g1Q" />
+            <SocialButton
+              icon={<Youtube />}
+              label="YouTube"
+              color="bg-red-600"
+              link="https://www.youtube.com/channel/UCfXAdaM-ZwO4rlIwQEh0g1Q"
+            />
             <SocialButton
               icon={<Linkedin />}
               label="LinkedIn"
@@ -522,15 +623,21 @@ function SocialButton({ icon, label, color, link }) {
   );
 }
 
-/* ----------------- LANDING ----------------- */
+/* =========================
+   Landing
+========================= */
 function LandingPage({ onStart, onAdmin }) {
   return (
     <div className="space-y-8 md:space-y-12 animate-in fade-in duration-700">
       <section className="text-center py-10 lg:py-20 relative overflow-hidden rounded-3xl bg-gradient-to-br from-blue-900 via-blue-800 to-red-900 text-white shadow-2xl mx-auto max-w-6xl">
-        <div className="absolute inset-0 opacity-10"></div>
+        <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/cubes.png')] opacity-10"></div>
         <div className="relative z-10 px-4 flex flex-col items-center">
           <div className="mb-6 animate-in zoom-in duration-1000">
-            <img src={LOGO_URL} alt="İngiliz Kültür Kolejleri" className="w-32 h-32 md:w-48 md:h-48 object-contain drop-shadow-2xl filter brightness-110" />
+            <img
+              src={LOGO_URL}
+              alt="İngiliz Kültür Kolejleri"
+              className="w-32 h-32 md:w-48 md:h-48 object-contain drop-shadow-2xl filter brightness-110"
+            />
           </div>
           <div className="inline-block px-6 py-2 mb-4 border border-white/30 rounded-full text-sm md:text-base font-medium backdrop-blur-sm bg-white/10">
             23 Nisan Ulusal Egemenlik ve Çocuk Bayramı
@@ -604,7 +711,9 @@ function CategoryCard({ title, rules, icon }) {
   );
 }
 
-/* ----------------- FORM ----------------- */
+/* =========================
+   Form
+========================= */
 function ApplicationForm({ onSubmit, onBack }) {
   const [formData, setFormData] = useState({
     studentName: "",
@@ -615,8 +724,9 @@ function ApplicationForm({ onSubmit, onBack }) {
     fileName: "",
     file: null,
     aiConsent: false,
-    instagramFollow: false
+    instagramFollow: false,
   });
+
   const [showKvkk, setShowKvkk] = useState(false);
 
   const getRulesForGrade = (grade) => {
@@ -627,15 +737,13 @@ function ApplicationForm({ onSubmit, onBack }) {
   };
 
   const handleFileChange = (e) => {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    setFormData((prev) => ({ ...prev, file: f, fileName: f.name }));
+    const file = e.target.files?.[0];
+    if (file) setFormData((p) => ({ ...p, file, fileName: file.name }));
   };
 
   const handleSubmit = (e) => {
     e.preventDefault();
-
-    if (!formData.aiConsent) return alert("Lütfen yapay zeka kullanmadığınızı onaylayın.");
+    if (!formData.aiConsent) return alert("Lütfen çalışmanın size ait olduğunu onaylayın.");
     if (!formData.instagramFollow) return alert("Lütfen Instagram hesabımızı takip ettiğinizi onaylayın.");
 
     let category = "Resim";
@@ -728,6 +836,7 @@ function ApplicationForm({ onSubmit, onBack }) {
               <span className="text-sm text-slate-600 break-all">{formData.fileName || "Dosya Seçmek İçin Tıklayın"}</span>
               <input required type="file" className="hidden" onChange={handleFileChange} />
             </label>
+
             <div className="mt-2 text-xs text-orange-600 flex items-center gap-1">
               <ShieldCheck className="w-3 h-3" /> Dosyalar otomatik olarak Gemini AI ile analiz edilecektir.
             </div>
@@ -744,6 +853,7 @@ function ApplicationForm({ onSubmit, onBack }) {
                   <p className="text-xs text-slate-500">Yarışma sonuçları buradan duyurulacaktır.</p>
                 </div>
               </div>
+
               <div className="flex flex-col items-end gap-2 w-full md:w-auto mt-2 md:mt-0">
                 <button
                   type="button"
@@ -752,6 +862,7 @@ function ApplicationForm({ onSubmit, onBack }) {
                 >
                   Sayfaya Git
                 </button>
+
                 <label className="flex items-center gap-2 cursor-pointer w-full md:w-auto justify-end">
                   <input
                     type="checkbox"
@@ -783,10 +894,7 @@ function ApplicationForm({ onSubmit, onBack }) {
             </label>
           </div>
 
-          <button
-            type="submit"
-            className="w-full bg-blue-900 hover:bg-blue-800 text-white font-bold py-4 rounded-xl shadow-lg hover:shadow-xl transition flex justify-center items-center gap-2"
-          >
+          <button type="submit" className="w-full bg-blue-900 hover:bg-blue-800 text-white font-bold py-4 rounded-xl shadow-lg hover:shadow-xl transition flex justify-center items-center gap-2">
             Başvuruyu Tamamla <CheckCircle />
           </button>
         </form>
@@ -819,7 +927,9 @@ function ApplicationForm({ onSubmit, onBack }) {
   );
 }
 
-/* ----------------- CERTIFICATE ----------------- */
+/* =========================
+   Certificate
+========================= */
 function Certificate({ data, onPrint, onNew }) {
   if (!data) return null;
 
@@ -830,10 +940,7 @@ function Certificate({ data, onPrint, onNew }) {
       </div>
 
       <div className="w-full overflow-x-auto pb-4 flex justify-center">
-        <div
-          id="print-area"
-          className="relative w-[800px] min-w-[800px] aspect-[1.414] bg-white border-[12px] border-double border-blue-900 p-12 shadow-2xl text-center flex flex-col justify-between mx-auto"
-        >
+        <div id="print-area" className="relative w-[800px] min-w-[800px] aspect-[1.414] bg-white border-[12px] border-double border-blue-900 p-12 shadow-2xl text-center flex flex-col justify-between mx-auto">
           <div className="absolute inset-0 opacity-5 pointer-events-none flex items-center justify-center overflow-hidden">
             <img src={LOGO_URL} alt="Watermark" className="w-96 grayscale opacity-50" />
           </div>
@@ -910,37 +1017,45 @@ function Certificate({ data, onPrint, onNew }) {
   );
 }
 
-/* ----------------- ADMIN LOGIN ----------------- */
+/* =========================
+   Admin Login
+========================= */
 function AdminLogin({ onLogin, onBack }) {
   const [u, setU] = useState("");
   const [p, setP] = useState("");
+
   return (
     <div className="max-w-md mx-auto bg-white p-8 rounded-xl shadow-2xl mt-10 mx-4">
       <h2 className="text-2xl font-bold text-center text-blue-900 mb-6 flex justify-center items-center gap-2">
         <Lock /> Jüri Paneli Girişi
       </h2>
+
       <div className="space-y-4">
         <div>
           <label className="block text-sm font-bold text-slate-700">Kullanıcı Adı</label>
           <input type="text" className="w-full p-2 border rounded outline-none focus:border-blue-500" value={u} onChange={(e) => setU(e.target.value)} />
         </div>
+
         <div>
           <label className="block text-sm font-bold text-slate-700">Şifre</label>
           <input type="password" className="w-full p-2 border rounded outline-none focus:border-blue-500" value={p} onChange={(e) => setP(e.target.value)} />
         </div>
+
         <button onClick={() => onLogin(u, p)} className="w-full bg-blue-900 text-white py-2 rounded font-bold hover:bg-blue-800 transition">
           Giriş Yap
         </button>
+
         <button onClick={onBack} className="w-full text-slate-500 text-sm hover:underline">
           Ana Sayfaya Dön
         </button>
-        <div className="text-center text-xs text-slate-400 mt-4">Demo Giriş: ikkadmin / 2026</div>
       </div>
     </div>
   );
 }
 
-/* ----------------- ADMIN DASHBOARD ----------------- */
+/* =========================
+   Admin Dashboard
+========================= */
 function AdminDashboard({ onLogout }) {
   const [submissions, setSubmissions] = useState([]);
   const [filter, setFilter] = useState("");
@@ -948,37 +1063,31 @@ function AdminDashboard({ onLogout }) {
 
   useEffect(() => {
     const fetchData = async () => {
-      const q = query(collection(db, "artifacts", appId, "public", "data", "submissions"), orderBy("createdAt", "desc"));
+      const q = query(SUBMISSIONS_COL, orderBy("createdAt", "desc"));
       const snapshot = await getDocs(q);
-      const data = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
+      const data = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
       setSubmissions(data);
 
-      setStats({
+      const st = {
         total: data.length,
-        resim: data.filter((x) => x.grade === "1").length,
-        siir: data.filter((x) => x.grade === "2").length,
-        komp: data.filter((x) => x.grade === "3").length
-      });
+        resim: data.filter((d) => d.grade === "1").length,
+        siir: data.filter((d) => d.grade === "2").length,
+        komp: data.filter((d) => d.grade === "3").length,
+      };
+      setStats(st);
     };
-
     fetchData();
   }, []);
 
   const filteredData = useMemo(() => {
     const f = filter.trim().toLowerCase();
     if (!f) return submissions;
-    return submissions.filter((s) => (s.studentName || "").toLowerCase().includes(f) || (s.validationId || "").toLowerCase().includes(f));
+    return submissions.filter((s) => {
+      const name = `${s.studentName || ""} ${s.studentSurname || ""}`.toLowerCase();
+      const id = String(s.validationId || "").toLowerCase();
+      return name.includes(f) || id.includes(f);
+    });
   }, [submissions, filter]);
-
-  const fileIcon = (sub) => {
-    const name = String(sub.fileName || "").toLowerCase();
-    const type = String(sub.fileType || "").toLowerCase();
-
-    if (type.includes("pdf") || name.endsWith(".pdf")) return <FileText size={12} />;
-    if (type.includes("image") || name.match(/\.(jpg|jpeg|png|webp)$/)) return <ImageIcon size={12} />;
-    if (name.match(/\.(doc|docx)$/)) return <FileText size={12} />;
-    return <Download size={12} />;
-  };
 
   return (
     <div className="bg-white rounded-xl shadow-xl min-h-[600px] flex flex-col overflow-hidden">
@@ -986,10 +1095,12 @@ function AdminDashboard({ onLogout }) {
         <h2 className="text-xl md:text-2xl font-bold flex items-center gap-2">
           <ShieldCheck className="text-green-400" /> Jüri Paneli
         </h2>
+
         <div className="flex gap-2">
           <button onClick={() => downloadCSV(filteredData)} className="bg-green-600 hover:bg-green-700 px-3 py-2 rounded flex items-center gap-2 text-xs md:text-sm font-bold transition">
             <Download size={16} /> <span className="hidden md:inline">Excel</span>
           </button>
+
           <button onClick={onLogout} className="bg-red-600 hover:bg-red-700 px-3 py-2 rounded flex items-center gap-2 text-xs md:text-sm font-bold transition">
             <LogOut size={16} /> <span className="hidden md:inline">Çıkış</span>
           </button>
@@ -997,17 +1108,17 @@ function AdminDashboard({ onLogout }) {
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-2 md:gap-4 p-4 bg-slate-50 border-b">
-        <StatBox title="Toplam" value={stats.total} />
-        <StatBox title="Resim" value={stats.resim} />
-        <StatBox title="Şiir" value={stats.siir} />
-        <StatBox title="Komp." value={stats.komp} />
+        <StatCard label="Toplam" value={stats.total} />
+        <StatCard label="Resim" value={stats.resim} />
+        <StatCard label="Şiir" value={stats.siir} />
+        <StatCard label="Komp." value={stats.komp} />
       </div>
 
       <div className="p-4 flex items-center gap-2 border-b">
         <Search className="text-slate-400 w-5 h-5" />
         <input
           type="text"
-          placeholder="Ara..."
+          placeholder="Ara (İsim veya ID)..."
           className="w-full md:w-1/3 outline-none text-slate-700 bg-transparent"
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
@@ -1027,13 +1138,12 @@ function AdminDashboard({ onLogout }) {
               <th className="p-3">Dosya</th>
             </tr>
           </thead>
+
           <tbody className="text-sm">
             {filteredData.map((sub) => (
               <tr key={sub.id} className="border-b hover:bg-slate-50 transition">
                 <td className="p-3 font-mono text-xs text-slate-500">{sub.validationId}</td>
-                <td className="p-3 font-bold text-slate-800">
-                  {sub.studentName} {sub.studentSurname}
-                </td>
+                <td className="p-3 font-bold text-slate-800">{sub.studentName} {sub.studentSurname}</td>
                 <td className="p-3">
                   <span
                     className={`px-2 py-1 rounded-full text-xs font-bold ${
@@ -1047,7 +1157,7 @@ function AdminDashboard({ onLogout }) {
                     {sub.category}
                   </span>
                 </td>
-                <td className="p-3 truncate max-w-[150px]">{sub.school}</td>
+                <td className="p-3 truncate max-w-[180px]">{sub.school}</td>
                 <td className="p-3">{sub.parentPhone}</td>
                 <td className="p-3">
                   <div className="flex items-center gap-1">
@@ -1063,18 +1173,16 @@ function AdminDashboard({ onLogout }) {
                     <span className="text-xs">{sub.aiScore}</span>
                   </div>
                 </td>
-
-                {/* ✅ DOSYA İNDİR/GÖR */}
                 <td className="p-3">
                   {sub.fileUrl ? (
                     <a
                       href={sub.fileUrl}
                       target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-blue-600 hover:underline text-xs flex items-center gap-1"
-                      title={sub.fileName || "Dosyayı aç"}
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-2 text-blue-700 hover:text-blue-900 font-semibold text-xs hover:underline"
+                      title={sub.fileName || "Dosyayı indir"}
                     >
-                      {fileIcon(sub)} İndir / Gör
+                      {getFileIcon(sub.fileName)} <span>İndir</span> <Download size={14} />
                     </a>
                   ) : (
                     <span className="text-slate-400 text-xs">—</span>
@@ -1097,10 +1205,10 @@ function AdminDashboard({ onLogout }) {
   );
 }
 
-function StatBox({ title, value }) {
+function StatCard({ label, value }) {
   return (
     <div className="bg-white p-3 md:p-4 rounded-lg shadow-sm border border-slate-200">
-      <div className="text-[10px] md:text-xs text-slate-500 uppercase font-bold">{title}</div>
+      <div className="text-[10px] md:text-xs text-slate-500 uppercase font-bold">{label}</div>
       <div className="text-xl md:text-2xl font-bold text-blue-900">{value}</div>
     </div>
   );
