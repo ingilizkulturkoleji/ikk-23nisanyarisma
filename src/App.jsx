@@ -9,12 +9,11 @@ import {
   orderBy,
   where,
   serverTimestamp,
+  doc,
+  getDoc,
+  setDoc,
 } from "firebase/firestore";
-import {
-  getAuth,
-  signInAnonymously,
-  onAuthStateChanged,
-} from "firebase/auth";
+import { getAuth, signInAnonymously, onAuthStateChanged } from "firebase/auth";
 import { getStorage, ref, uploadBytes, getDownloadURL } from "firebase/storage";
 
 import {
@@ -70,13 +69,21 @@ const storage = getStorage(app);
 
 // Firestore path
 const APP_ID = "ikk-yarisma";
-const SUBMISSIONS_COL = collection(db, "artifacts", APP_ID, "public", "data", "submissions");
+const SUBMISSIONS_COL = collection(
+  db,
+  "artifacts",
+  APP_ID,
+  "public",
+  "data",
+  "submissions"
+);
 
 /* =========================
    Assets / Constants
 ========================= */
 const LOGO_URL = "https://i.ibb.co/zHJ5f7bd/ikk-LOGO-PNG.png";
-const SEAL_URL = "https://i.ibb.co/7xtJHgHX/Gemini-Generated-mage-m6wzg8m6wzg8m6wz-removebg-preview.png";
+const SEAL_URL =
+  "https://i.ibb.co/7xtJHgHX/Gemini-Generated-mage-m6wzg8m6wzg8m6wz-removebg-preview.png";
 const SIGNATURE_URL = "https://i.ibb.co/DD6G3YfM/g-rhanimza.png";
 const PRINCIPAL_NAME = "Gürhan Keskin";
 
@@ -87,29 +94,39 @@ const ADMIN_PASS = "ikk2026";
 /* =========================
    Helpers
 ========================= */
-const generateValidationId = () => "IKK-" + Math.random().toString(36).slice(2, 11).toUpperCase();
+const generateValidationId = () =>
+  "IKK-" + Math.random().toString(36).slice(2, 11).toUpperCase();
 
 const normalizePhone = (raw = "") => {
   const digits = String(raw).replace(/\D/g, "");
-  // 90 ile başlıyorsa kırpma (isteğe bağlı). Biz sadece standartlaştırıyoruz:
-  // 0 ile başlıyorsa 0'ı koruyalım; önemli olan aynı girilse bile aynı normalize olması.
   return digits;
 };
 
 const normalizeName = (raw = "") =>
   String(raw).trim().toLocaleLowerCase("tr-TR").replace(/\s+/g, " ");
 
+const makeSubmissionKey = ({ studentName, studentSurname, parentPhone }) => {
+  const phoneNorm = normalizePhone(parentPhone);
+  const nameNorm = normalizeName(studentName);
+  const surnameNorm = normalizeName(studentSurname);
+  const safe = (s) => s.replace(/[^a-z0-9ğüşöçı_]/gi, "_");
+  return `dup_${safe(nameNorm)}_${safe(surnameNorm)}_${phoneNorm}`;
+};
+
 const getFileIcon = (name = "") => {
   const ext = name.split(".").pop()?.toLowerCase();
-  if (["jpg", "jpeg", "png", "webp", "gif", "bmp", "heic"].includes(ext)) return <FileImage size={14} />;
-  if (["pdf", "doc", "docx", "txt"].includes(ext)) return <FileText size={14} />;
+  if (["jpg", "jpeg", "png", "webp", "gif", "bmp", "heic"].includes(ext))
+    return <FileImage size={14} />;
+  if (["pdf", "doc", "docx", "txt"].includes(ext))
+    return <FileText size={14} />;
   return <File size={14} />;
 };
 
-// Gemini: yalnızca resimler için (senin ilk kurguna uygun)
+// Gemini: yalnızca resimler için
 const analyzeWithGemini = async (file) => {
   if (!file) return "Dosya Yok";
-  if (!file.type?.startsWith("image/")) return "Format Desteklenmiyor (Manuel Kontrol)";
+  if (!file.type?.startsWith("image/"))
+    return "Format Desteklenmiyor (Manuel Kontrol)";
   if (!GEMINI_API_KEY) return "API Anahtarı Yok (Manuel Kontrol)";
 
   const base64Data = await new Promise((resolve, reject) => {
@@ -168,7 +185,9 @@ const downloadCSV = (data) => {
   const rows = [headers.join(";")];
 
   data.forEach((row) => {
-    const created = row.createdAt?.seconds ? new Date(row.createdAt.seconds * 1000) : null;
+    const created = row.createdAt?.seconds
+      ? new Date(row.createdAt.seconds * 1000)
+      : null;
     const rowData = [
       row.studentName,
       row.studentSurname,
@@ -184,7 +203,8 @@ const downloadCSV = (data) => {
 
     const escaped = rowData.map((field) => {
       const s = String(field ?? "");
-      if (s.includes(";") || s.includes("\n")) return `"${s.replace(/"/g, '""')}"`;
+      if (s.includes(";") || s.includes("\n"))
+        return `"${s.replace(/"/g, '""')}"`;
       return s;
     });
 
@@ -206,18 +226,22 @@ const downloadCSV = (data) => {
 ========================= */
 const KvkkContent = () => (
   <div className="text-sm text-slate-700 leading-relaxed space-y-4">
-    <p><strong>Değerli İlgili,</strong></p>
     <p>
-      6698 Sayılı Kişisel Verilerin Korunması Kanunu (KVKK) kapsamında kişisel verileriniz
-      işlenebilir, paylaşılabilir, muhafaza edilebilir ve gerektiğinde imha edilebilir.
+      <strong>Değerli İlgili,</strong>
     </p>
     <p>
-      <strong>Batıkent İngiliz Kültür Koleji</strong> olarak kişisel verilerin güvenliği için
-      azami özen gösterilmektedir.
+      6698 Sayılı Kişisel Verilerin Korunması Kanunu (KVKK) kapsamında kişisel
+      verileriniz işlenebilir, paylaşılabilir, muhafaza edilebilir ve
+      gerektiğinde imha edilebilir.
     </p>
     <p>
-      https://www.ingilizkultur.com.tr/ adresinde yer alan aydınlatma metnini okudum, anladım.
-      Kişisel verilerimin belirtilen şekilde işlenmesine onay veriyorum.
+      <strong>Batıkent İngiliz Kültür Koleji</strong> olarak kişisel verilerin
+      güvenliği için azami özen gösterilmektedir.
+    </p>
+    <p>
+      https://www.ingilizkultur.com.tr/ adresinde yer alan aydınlatma metnini
+      okudum, anladım. Kişisel verilerimin belirtilen şekilde işlenmesine onay
+      veriyorum.
     </p>
   </div>
 );
@@ -264,7 +288,6 @@ export default function IKKCompetitionApp() {
       return;
     }
 
-    // Duplicate check (aynı ad+soyad + aynı telefon)
     const phoneNorm = normalizePhone(formData.parentPhone);
     const nameNorm = normalizeName(formData.studentName);
     const surnameNorm = normalizeName(formData.studentSurname);
@@ -272,26 +295,35 @@ export default function IKKCompetitionApp() {
     setLoading(true);
     setLoadingMessage("Başvuru kontrol ediliyor...");
 
-    try {
-      // Sadece telefon ile query (index istemez). Sonra isimle JS içinde doğrula.
-      const qPhone = query(SUBMISSIONS_COL, where("parentPhoneNorm", "==", phoneNorm));
-      const snap = await getDocs(qPhone);
-      const exists = snap.docs.some((d) => {
-        const x = d.data();
-        return (
-          normalizeName(x.studentName) === nameNorm &&
-          normalizeName(x.studentSurname) === surnameNorm
-        );
-      });
+    // ✅ %100 duplicate engeli: docId üzerinden
+    const dupId = makeSubmissionKey({
+      studentName: formData.studentName,
+      studentSurname: formData.studentSurname,
+      parentPhone: formData.parentPhone,
+    });
 
-      if (exists) {
+    const dupRef = doc(
+      db,
+      "artifacts",
+      APP_ID,
+      "public",
+      "data",
+      "submissions",
+      dupId
+    );
+
+    try {
+      const existing = await getDoc(dupRef);
+      if (existing.exists()) {
         setLoading(false);
-        alert("Bu öğrenci için (aynı ad/soyad ve aynı telefon) daha önce başvuru yapılmış.");
+        alert(
+          "Bu öğrenci için (aynı ad/soyad ve aynı telefon) daha önce başvuru yapılmış."
+        );
         return;
       }
     } catch (e) {
       console.error("Duplicate check error:", e);
-      // check başarısız olsa bile başvuruya izin vermek istemiyorsan burada return yapabilirsin
+      // burada isterse durdurabilirsin
     }
 
     // Gemini
@@ -351,7 +383,9 @@ export default function IKKCompetitionApp() {
     };
 
     try {
-      await addDoc(SUBMISSIONS_COL, finalData);
+      // ✅ addDoc yerine setDoc -> tekil kayıt
+      await setDoc(dupRef, finalData);
+
       setSubmissionData(finalData);
       setLoading(false);
       setView("certificate");
@@ -365,9 +399,19 @@ export default function IKKCompetitionApp() {
   const renderView = () => {
     switch (view) {
       case "landing":
-        return <LandingPage onStart={() => setView("form")} onAdmin={() => setView("adminLogin")} />;
+        return (
+          <LandingPage
+            onStart={() => setView("form")}
+            onAdmin={() => setView("adminLogin")}
+          />
+        );
       case "form":
-        return <ApplicationForm onSubmit={handleSubmission} onBack={() => setView("landing")} />;
+        return (
+          <ApplicationForm
+            onSubmit={handleSubmission}
+            onBack={() => setView("landing")}
+          />
+        );
       case "certificate":
         return (
           <Certificate
@@ -379,7 +423,9 @@ export default function IKKCompetitionApp() {
       case "contact":
         return <ContactPage onBack={() => setView("landing")} />;
       case "adminLogin":
-        return <AdminLogin onLogin={handleAdminLogin} onBack={() => setView("landing")} />;
+        return (
+          <AdminLogin onLogin={handleAdminLogin} onBack={() => setView("landing")} />
+        );
       case "adminDashboard":
         return (
           <AdminDashboard
@@ -390,7 +436,12 @@ export default function IKKCompetitionApp() {
           />
         );
       default:
-        return <LandingPage onStart={() => setView("form")} onAdmin={() => setView("adminLogin")} />;
+        return (
+          <LandingPage
+            onStart={() => setView("form")}
+            onAdmin={() => setView("adminLogin")}
+          />
+        );
     }
   };
 
@@ -398,7 +449,10 @@ export default function IKKCompetitionApp() {
     <div className="min-h-screen font-sans text-slate-800 bg-slate-50 selection:bg-blue-200 flex flex-col">
       <header className="bg-white shadow-md sticky top-0 z-50">
         <div className="container mx-auto px-4 py-3 md:py-4 flex justify-between items-center">
-          <div className="flex items-center space-x-4 cursor-pointer" onClick={() => setView("landing")}>
+          <div
+            className="flex items-center space-x-4 cursor-pointer"
+            onClick={() => setView("landing")}
+          >
             <div className="w-16 h-16 md:w-24 md:h-24 bg-white rounded-full flex items-center justify-center shadow-lg overflow-hidden border-2 border-slate-100">
               <img
                 src={LOGO_URL}
@@ -411,7 +465,8 @@ export default function IKKCompetitionApp() {
             </div>
             <div>
               <h1 className="text-xl md:text-3xl font-extrabold text-blue-900 leading-none tracking-tight">
-                İNGİLİZ KÜLTÜR <br /> <span className="text-red-600">KOLEJLERİ</span>
+                İNGİLİZ KÜLTÜR <br />{" "}
+                <span className="text-red-600">KOLEJLERİ</span>
               </h1>
             </div>
           </div>
@@ -429,7 +484,10 @@ export default function IKKCompetitionApp() {
           </div>
 
           <div className="md:hidden">
-            <button onClick={() => setMobileMenuOpen(!mobileMenuOpen)} className="text-blue-900">
+            <button
+              onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+              className="text-blue-900"
+            >
               {mobileMenuOpen ? <X size={32} /> : <Menu size={32} />}
             </button>
           </div>
@@ -596,7 +654,10 @@ function ContactPage({ onBack }) {
       </div>
 
       <div className="text-center pt-8">
-        <button onClick={onBack} className="text-slate-500 hover:text-blue-900 transition flex items-center justify-center mx-auto gap-2">
+        <button
+          onClick={onBack}
+          className="text-slate-500 hover:text-blue-900 transition flex items-center justify-center mx-auto gap-2"
+        >
           <LogOut className="rotate-180" size={18} /> Ana Sayfaya Dön
         </button>
       </div>
@@ -940,7 +1001,10 @@ function Certificate({ data, onPrint, onNew }) {
       </div>
 
       <div className="w-full overflow-x-auto pb-4 flex justify-center">
-        <div id="print-area" className="relative w-[800px] min-w-[800px] aspect-[1.414] bg-white border-[12px] border-double border-blue-900 p-12 shadow-2xl text-center flex flex-col justify-between mx-auto">
+        <div
+          id="print-area"
+          className="relative w-[800px] min-w-[800px] aspect-[1.414] bg-white border-[12px] border-double border-blue-900 p-12 shadow-2xl text-center flex flex-col justify-between mx-auto"
+        >
           <div className="absolute inset-0 opacity-5 pointer-events-none flex items-center justify-center overflow-hidden">
             <img src={LOGO_URL} alt="Watermark" className="w-96 grayscale opacity-50" />
           </div>
@@ -1033,15 +1097,28 @@ function AdminLogin({ onLogin, onBack }) {
       <div className="space-y-4">
         <div>
           <label className="block text-sm font-bold text-slate-700">Kullanıcı Adı</label>
-          <input type="text" className="w-full p-2 border rounded outline-none focus:border-blue-500" value={u} onChange={(e) => setU(e.target.value)} />
+          <input
+            type="text"
+            className="w-full p-2 border rounded outline-none focus:border-blue-500"
+            value={u}
+            onChange={(e) => setU(e.target.value)}
+          />
         </div>
 
         <div>
           <label className="block text-sm font-bold text-slate-700">Şifre</label>
-          <input type="password" className="w-full p-2 border rounded outline-none focus:border-blue-500" value={p} onChange={(e) => setP(e.target.value)} />
+          <input
+            type="password"
+            className="w-full p-2 border rounded outline-none focus:border-blue-500"
+            value={p}
+            onChange={(e) => setP(e.target.value)}
+          />
         </div>
 
-        <button onClick={() => onLogin(u, p)} className="w-full bg-blue-900 text-white py-2 rounded font-bold hover:bg-blue-800 transition">
+        <button
+          onClick={() => onLogin(u, p)}
+          className="w-full bg-blue-900 text-white py-2 rounded font-bold hover:bg-blue-800 transition"
+        >
           Giriş Yap
         </button>
 
@@ -1065,7 +1142,7 @@ function AdminDashboard({ onLogout }) {
     const fetchData = async () => {
       const q = query(SUBMISSIONS_COL, orderBy("createdAt", "desc"));
       const snapshot = await getDocs(q);
-      const data = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+      const data = snapshot.docs.map((docu) => ({ id: docu.id, ...docu.data() }));
       setSubmissions(data);
 
       const st = {
@@ -1097,11 +1174,17 @@ function AdminDashboard({ onLogout }) {
         </h2>
 
         <div className="flex gap-2">
-          <button onClick={() => downloadCSV(filteredData)} className="bg-green-600 hover:bg-green-700 px-3 py-2 rounded flex items-center gap-2 text-xs md:text-sm font-bold transition">
+          <button
+            onClick={() => downloadCSV(filteredData)}
+            className="bg-green-600 hover:bg-green-700 px-3 py-2 rounded flex items-center gap-2 text-xs md:text-sm font-bold transition"
+          >
             <Download size={16} /> <span className="hidden md:inline">Excel</span>
           </button>
 
-          <button onClick={onLogout} className="bg-red-600 hover:bg-red-700 px-3 py-2 rounded flex items-center gap-2 text-xs md:text-sm font-bold transition">
+          <button
+            onClick={onLogout}
+            className="bg-red-600 hover:bg-red-700 px-3 py-2 rounded flex items-center gap-2 text-xs md:text-sm font-bold transition"
+          >
             <LogOut size={16} /> <span className="hidden md:inline">Çıkış</span>
           </button>
         </div>
@@ -1143,7 +1226,9 @@ function AdminDashboard({ onLogout }) {
             {filteredData.map((sub) => (
               <tr key={sub.id} className="border-b hover:bg-slate-50 transition">
                 <td className="p-3 font-mono text-xs text-slate-500">{sub.validationId}</td>
-                <td className="p-3 font-bold text-slate-800">{sub.studentName} {sub.studentSurname}</td>
+                <td className="p-3 font-bold text-slate-800">
+                  {sub.studentName} {sub.studentSurname}
+                </td>
                 <td className="p-3">
                   <span
                     className={`px-2 py-1 rounded-full text-xs font-bold ${

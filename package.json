@@ -4,22 +4,22 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "vite --host",
     "build": "vite build",
     "preview": "vite preview --host"
   },
   "dependencies": {
-    "firebase": "^10.14.1",
-    "lucide-react": "^0.542.0",
+    "firebase": "^12.9.0",
+    "lucide-react": "^0.484.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4.1.0",
+    "@tailwindcss/postcss": "^4.1.18",
     "@vitejs/plugin-react": "^4.3.1",
     "autoprefixer": "^10.4.20",
     "postcss": "^8.4.41",
-    "tailwindcss": "^4.1.0",
+    "tailwindcss": "^4.1.18",
     "vite": "^5.4.2"
   }
 }
