@@ -10,13 +10,14 @@ import {
   doc,
   getDoc,
   setDoc,
+  updateDoc,
 } from "firebase/firestore";
 import { getAuth, signInAnonymously, onAuthStateChanged } from "firebase/auth";
 import {
   getStorage,
   ref,
-  uploadBytesResumable,
   getDownloadURL,
+  uploadBytesResumable,
 } from "firebase/storage";
 
 import {
@@ -72,14 +73,7 @@ const storage = getStorage(app);
 
 // Firestore path
 const APP_ID = "ikk-yarisma";
-const SUBMISSIONS_COL = collection(
-  db,
-  "artifacts",
-  APP_ID,
-  "public",
-  "data",
-  "submissions"
-);
+const SUBMISSIONS_COL = collection(db, "artifacts", APP_ID, "public", "data", "submissions");
 
 /* =========================
    Assets / Constants
@@ -100,10 +94,7 @@ const ADMIN_PASS = "ikk2026";
 const generateValidationId = () =>
   "IKK-" + Math.random().toString(36).slice(2, 11).toUpperCase();
 
-const normalizePhone = (raw = "") => {
-  const digits = String(raw).replace(/\D/g, "");
-  return digits;
-};
+const normalizePhone = (raw = "") => String(raw).replace(/\D/g, "");
 
 const normalizeName = (raw = "") =>
   String(raw).trim().toLocaleLowerCase("tr-TR").replace(/\s+/g, " ");
@@ -125,98 +116,17 @@ const getFileIcon = (name = "") => {
   return <File size={14} />;
 };
 
-/* =========================
-   FAST UPLOAD HELPERS (NEW)
-========================= */
-const uploadFileWithProgress = (storageInstance, path, file, onProgress) =>
-  new Promise((resolve, reject) => {
-    const fileRef = ref(storageInstance, path);
-    const task = uploadBytesResumable(fileRef, file);
-
-    task.on(
-      "state_changed",
-      (snap) => {
-        const pct = snap.totalBytes
-          ? Math.round((snap.bytesTransferred / snap.totalBytes) * 100)
-          : 0;
-        onProgress?.(pct);
-      },
-      (err) => reject(err),
-      async () => {
-        const url = await getDownloadURL(task.snapshot.ref);
-        resolve(url);
-      }
-    );
-  });
-
-const readImageAsBitmapOrImage = async (file) => {
-  // createImageBitmap hızlı (çoğu tarayıcı), yoksa Image() fallback
-  if ("createImageBitmap" in window) {
-    return await createImageBitmap(file);
-  }
-  return await new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = reject;
-    img.src = URL.createObjectURL(file);
-  });
-};
-
-const compressImageIfNeeded = async (file) => {
-  // Sadece görselleri sıkıştır
-  if (!file?.type?.startsWith("image/")) return file;
-
-  // Çok küçükse uğraşma
-  const MAX_TARGET_BYTES = 1200 * 1024; // ~1.2MB hedef
-  if (file.size <= MAX_TARGET_BYTES) return file;
-
-  try {
-    const img = await readImageAsBitmapOrImage(file);
-
-    const canvas = document.createElement("canvas");
-    const ctx = canvas.getContext("2d");
-
-    const w = img.width || img.naturalWidth;
-    const h = img.height || img.naturalHeight;
-
-    // Maksimum genişlik/yükseklik sınırı
-    const MAX_DIM = 1800; // hız + kalite dengesi
-    const scale = Math.min(1, MAX_DIM / Math.max(w, h));
-    const nw = Math.round(w * scale);
-    const nh = Math.round(h * scale);
-
-    canvas.width = nw;
-    canvas.height = nh;
-
-    ctx.drawImage(img, 0, 0, nw, nh);
-
-    // JPEG’e çevirerek sıkıştır (png/heic vs -> jpeg olur, çok hızlanır)
-    const quality = 0.78;
-
-    const blob = await new Promise((resolve) =>
-      canvas.toBlob(resolve, "image/jpeg", quality)
-    );
-
-    if (!blob) return file;
-
-    const newFile = new File([blob], file.name.replace(/\.\w+$/, "") + ".jpg", {
-      type: "image/jpeg",
-    });
-
-    // Eğer gerçekten küçülmediyse eskiyi kullan
-    if (newFile.size >= file.size) return file;
-
-    return newFile;
-  } catch {
-    return file; // sıkıştırma başarısızsa orijinal
-  }
+const isAllowedFile = (file) => {
+  if (!file) return false;
+  const ext = file.name.split(".").pop()?.toLowerCase();
+  const allowed = ["jpg", "jpeg", "png", "webp", "pdf", "doc", "docx"];
+  return allowed.includes(ext);
 };
 
 // Gemini: yalnızca resimler için
 const analyzeWithGemini = async (file) => {
   if (!file) return "Dosya Yok";
-  if (!file.type?.startsWith("image/"))
-    return "Format Desteklenmiyor (Manuel Kontrol)";
+  if (!file.type?.startsWith("image/")) return "Format Desteklenmiyor (Manuel Kontrol)";
   if (!GEMINI_API_KEY) return "API Anahtarı Yok (Manuel Kontrol)";
 
   const base64Data = await new Promise((resolve, reject) => {
@@ -275,9 +185,7 @@ const downloadCSV = (data) => {
   const rows = [headers.join(";")];
 
   data.forEach((row) => {
-    const created = row.createdAt?.seconds
-      ? new Date(row.createdAt.seconds * 1000)
-      : null;
+    const created = row.createdAt?.seconds ? new Date(row.createdAt.seconds * 1000) : null;
     const rowData = [
       row.studentName,
       row.studentSurname,
@@ -293,8 +201,7 @@ const downloadCSV = (data) => {
 
     const escaped = rowData.map((field) => {
       const s = String(field ?? "");
-      if (s.includes(";") || s.includes("\n"))
-        return `"${s.replace(/"/g, '""')}"`;
+      if (s.includes(";") || s.includes("\n")) return `"${s.replace(/"/g, '""')}"`;
       return s;
     });
 
@@ -316,22 +223,19 @@ const downloadCSV = (data) => {
 ========================= */
 const KvkkContent = () => (
   <div className="text-sm text-slate-700 leading-relaxed space-y-4">
-    <p>
-      <strong>Değerli İlgili,</strong>
-    </p>
+    <p><strong>Değerli İlgili,</strong></p>
     <p>
       6698 Sayılı Kişisel Verilerin Korunması Kanunu (KVKK) kapsamında kişisel
-      verileriniz işlenebilir, paylaşılabilir, muhafaza edilebilir ve
-      gerektiğinde imha edilebilir.
+      verileriniz işlenebilir, paylaşılabilir, muhafaza edilebilir ve gerektiğinde
+      imha edilebilir.
     </p>
     <p>
       <strong>Batıkent İngiliz Kültür Koleji</strong> olarak kişisel verilerin
       güvenliği için azami özen gösterilmektedir.
     </p>
     <p>
-      https://www.ingilizkultur.com.tr/ adresinde yer alan aydınlatma metnini
-      okudum, anladım. Kişisel verilerimin belirtilen şekilde işlenmesine onay
-      veriyorum.
+      https://www.ingilizkultur.com.tr/ adresinde yer alan aydınlatma metnini okudum,
+      anladım. Kişisel verilerimin belirtilen şekilde işlenmesine onay veriyorum.
     </p>
   </div>
 );
@@ -378,6 +282,11 @@ export default function IKKCompetitionApp() {
       return;
     }
 
+    if (!formData.file || !isAllowedFile(formData.file)) {
+      alert("Lütfen JPG/PNG/WEBP veya PDF/DOC/DOCX dosyası yükleyin.");
+      return;
+    }
+
     const phoneNorm = normalizePhone(formData.parentPhone);
 
     setLoading(true);
@@ -390,88 +299,60 @@ export default function IKKCompetitionApp() {
       parentPhone: formData.parentPhone,
     });
 
-    const dupRef = doc(
-      db,
-      "artifacts",
-      APP_ID,
-      "public",
-      "data",
-      "submissions",
-      dupId
-    );
+    const dupRef = doc(db, "artifacts", APP_ID, "public", "data", "submissions", dupId);
 
     try {
       const existing = await getDoc(dupRef);
       if (existing.exists()) {
         setLoading(false);
-        alert(
-          "Bu öğrenci için (aynı ad/soyad ve aynı telefon) daha önce başvuru yapılmış."
-        );
+        alert("Bu öğrenci için (aynı ad/soyad ve aynı telefon) daha önce başvuru yapılmış.");
         return;
       }
     } catch (e) {
       console.error("Duplicate check error:", e);
-      // burada istersen durdurabilirsin
+      // İstersen burada durdurabilirsin.
     }
 
-    // Dosyayı hızlandır: görselleri sıkıştır
-    setLoadingMessage("Dosya hazırlanıyor (hızlandırma)...");
+    // Upload (Resumable + Progress)
+    setLoadingMessage("Dosya yükleniyor... (%0)");
 
-    let fileToUpload = formData.file;
-    let fileName = formData.file?.name || "";
-    let fileType = formData.file?.type || "";
-
-    try {
-      const compressed = await compressImageIfNeeded(formData.file);
-      fileToUpload = compressed;
-      fileName = compressed?.name || fileName;
-      fileType = compressed?.type || fileType;
-    } catch {
-      // ignore
-    }
-
-    // Paralel: Gemini + Upload
-    setLoadingMessage("İşlem başlatılıyor...");
-
-    let aiScoreResult = "Analiz Bekleniyor";
     let fileUrl = "";
     let storagePath = "";
+    const fileName = formData.file?.name || "";
+    const fileType = formData.file?.type || "";
 
     try {
-      if (fileToUpload) {
-        const safeName = `${Date.now()}_${fileName}`.replace(/\s+/g, "_");
-        storagePath = `submissions/${user.uid}/${safeName}`;
+      const safeName = `${Date.now()}_${fileName}`.replace(/\s+/g, "_");
+      storagePath = `submissions/${user.uid}/${safeName}`;
+      const fileRef = ref(storage, storagePath);
 
-        const uploadPromise = uploadFileWithProgress(
-          storage,
-          storagePath,
-          fileToUpload,
-          (pct) => {
+      await new Promise((resolve, reject) => {
+        const task = uploadBytesResumable(fileRef, formData.file);
+
+        task.on(
+          "state_changed",
+          (snap) => {
+            const pct = Math.round((snap.bytesTransferred / snap.totalBytes) * 100);
             setLoadingMessage(`Dosya yükleniyor... (%${pct})`);
-          }
+          },
+          (err) => reject(err),
+          () => resolve()
         );
+      });
 
-        const geminiPromise = analyzeWithGemini(fileToUpload);
-
-        const [uploadedUrl, geminiResult] = await Promise.all([
-          uploadPromise,
-          geminiPromise,
-        ]);
-
-        fileUrl = uploadedUrl;
-        aiScoreResult = geminiResult || "Analiz Edilemedi";
-      } else {
-        // dosya yoksa:
-        aiScoreResult = "Dosya Yok";
-      }
+      fileUrl = await getDownloadURL(ref(storage, storagePath));
     } catch (e) {
-      console.error("Upload/Gemini error:", e);
+      console.error("Storage upload error:", e);
       setLoading(false);
-      alert("Dosya yükleme veya analiz sırasında hata oluştu. Lütfen tekrar deneyin.");
+      alert("Dosya yükleme sırasında hata oluştu. (CORS / Yetki / Ağ) Lütfen tekrar deneyin.");
       return;
     }
 
-    setLoadingMessage("Sonuçlar kaydediliyor ve sertifika hazırlanıyor...");
+    // Firestore kaydı (Gemini beklemeden!)
+    setLoadingMessage("Kaydediliyor ve sertifika hazırlanıyor...");
+
+    const initialAiScore =
+      formData.file?.type?.startsWith("image/") ? "Analiz Kuyrukta" : "Manuel Kontrol";
 
     const finalData = {
       studentName: formData.studentName,
@@ -486,7 +367,7 @@ export default function IKKCompetitionApp() {
       userId: user.uid,
       createdAt: serverTimestamp(),
       status: "İnceleniyor",
-      aiScore: aiScoreResult,
+      aiScore: initialAiScore,
 
       fileName,
       fileType,
@@ -495,12 +376,25 @@ export default function IKKCompetitionApp() {
     };
 
     try {
-      // ✅ addDoc yerine setDoc -> tekil kayıt
       await setDoc(dupRef, finalData);
 
+      // Kullanıcıyı bekletme: hemen sertifikaya geçir
       setSubmissionData(finalData);
       setLoading(false);
       setView("certificate");
+
+      // 🔥 Gemini arka planda çalışsın (sadece resim)
+      if (formData.file?.type?.startsWith("image/")) {
+        analyzeWithGemini(formData.file)
+          .then(async (score) => {
+            try {
+              await updateDoc(dupRef, { aiScore: score || "Analiz Edilemedi" });
+            } catch (e) {
+              console.error("AI score update error:", e);
+            }
+          })
+          .catch((e) => console.error("Gemini bg error:", e));
+      }
     } catch (e) {
       console.error("Firestore add error:", e);
       setLoading(false);
@@ -511,19 +405,9 @@ export default function IKKCompetitionApp() {
   const renderView = () => {
     switch (view) {
       case "landing":
-        return (
-          <LandingPage
-            onStart={() => setView("form")}
-            onAdmin={() => setView("adminLogin")}
-          />
-        );
+        return <LandingPage onStart={() => setView("form")} onAdmin={() => setView("adminLogin")} />;
       case "form":
-        return (
-          <ApplicationForm
-            onSubmit={handleSubmission}
-            onBack={() => setView("landing")}
-          />
-        );
+        return <ApplicationForm onSubmit={handleSubmission} onBack={() => setView("landing")} />;
       case "certificate":
         return (
           <Certificate
@@ -535,12 +419,7 @@ export default function IKKCompetitionApp() {
       case "contact":
         return <ContactPage onBack={() => setView("landing")} />;
       case "adminLogin":
-        return (
-          <AdminLogin
-            onLogin={handleAdminLogin}
-            onBack={() => setView("landing")}
-          />
-        );
+        return <AdminLogin onLogin={handleAdminLogin} onBack={() => setView("landing")} />;
       case "adminDashboard":
         return (
           <AdminDashboard
@@ -551,12 +430,7 @@ export default function IKKCompetitionApp() {
           />
         );
       default:
-        return (
-          <LandingPage
-            onStart={() => setView("form")}
-            onAdmin={() => setView("adminLogin")}
-          />
-        );
+        return <LandingPage onStart={() => setView("form")} onAdmin={() => setView("adminLogin")} />;
     }
   };
 
@@ -564,24 +438,13 @@ export default function IKKCompetitionApp() {
     <div className="min-h-screen font-sans text-slate-800 bg-slate-50 selection:bg-blue-200 flex flex-col">
       <header className="bg-white shadow-md sticky top-0 z-50">
         <div className="container mx-auto px-4 py-3 md:py-4 flex justify-between items-center">
-          <div
-            className="flex items-center space-x-4 cursor-pointer"
-            onClick={() => setView("landing")}
-          >
+          <div className="flex items-center space-x-4 cursor-pointer" onClick={() => setView("landing")}>
             <div className="w-16 h-16 md:w-24 md:h-24 bg-white rounded-full flex items-center justify-center shadow-lg overflow-hidden border-2 border-slate-100">
-              <img
-                src={LOGO_URL}
-                alt="İKK"
-                className="w-full h-full object-contain p-1"
-                onError={(e) => {
-                  e.currentTarget.style.display = "none";
-                }}
-              />
+              <img src={LOGO_URL} alt="İKK" className="w-full h-full object-contain p-1" />
             </div>
             <div>
               <h1 className="text-xl md:text-3xl font-extrabold text-blue-900 leading-none tracking-tight">
-                İNGİLİZ KÜLTÜR <br />{" "}
-                <span className="text-red-600">KOLEJLERİ</span>
+                İNGİLİZ KÜLTÜR <br /> <span className="text-red-600">KOLEJLERİ</span>
               </h1>
             </div>
           </div>
@@ -599,10 +462,7 @@ export default function IKKCompetitionApp() {
           </div>
 
           <div className="md:hidden">
-            <button
-              onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-              className="text-blue-900"
-            >
+            <button onClick={() => setMobileMenuOpen(!mobileMenuOpen)} className="text-blue-900">
               {mobileMenuOpen ? <X size={32} /> : <Menu size={32} />}
             </button>
           </div>
@@ -769,10 +629,7 @@ function ContactPage({ onBack }) {
       </div>
 
       <div className="text-center pt-8">
-        <button
-          onClick={onBack}
-          className="text-slate-500 hover:text-blue-900 transition flex items-center justify-center mx-auto gap-2"
-        >
+        <button onClick={onBack} className="text-slate-500 hover:text-blue-900 transition flex items-center justify-center mx-auto gap-2">
           <LogOut className="rotate-180" size={18} /> Ana Sayfaya Dön
         </button>
       </div>
@@ -809,10 +666,11 @@ function LandingPage({ onStart, onAdmin }) {
         <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/cubes.png')] opacity-10"></div>
         <div className="relative z-10 px-4 flex flex-col items-center">
           <div className="mb-6 animate-in zoom-in duration-1000">
+            {/* ✅ Logo büyütüldü */}
             <img
               src={LOGO_URL}
               alt="İngiliz Kültür Kolejleri"
-              className="w-32 h-32 md:w-48 md:h-48 object-contain drop-shadow-2xl filter brightness-110"
+              className="w-40 h-40 md:w-60 md:h-60 object-contain drop-shadow-2xl filter brightness-110"
             />
           </div>
           <div className="inline-block px-6 py-2 mb-4 border border-white/30 rounded-full text-sm md:text-base font-medium backdrop-blur-sm bg-white/10">
@@ -906,15 +764,22 @@ function ApplicationForm({ onSubmit, onBack }) {
   const [showKvkk, setShowKvkk] = useState(false);
 
   const getRulesForGrade = (grade) => {
-    if (grade === "1") return "Lütfen resim çalışmanızı A4 kağıdına yapıp net bir şekilde fotoğrafını çekerek yükleyiniz. (JPEG/PNG)";
-    if (grade === "2") return "Şiirinizi A4 kağıdına kendi el yazınızla yazıp fotoğrafını yükleyiniz. (JPEG/PNG)";
-    if (grade === "3") return "Kompozisyonunuzu en az 200 kelime olacak şekilde yazınız. Birden fazla sayfa ise tek bir dosya olarak yükleyiniz. (PDF/DOC/IMG)";
+    if (grade === "1") return "Lütfen resim çalışmanızı A4 kağıdına yapıp net bir şekilde fotoğrafını çekerek yükleyiniz. (JPEG/PNG/WEBP)";
+    if (grade === "2") return "Şiirinizi A4 kağıdına kendi el yazınızla yazıp fotoğrafını yükleyiniz. (JPEG/PNG/WEBP)";
+    if (grade === "3") return "Kompozisyonunuzu en az 200 kelime olacak şekilde yazınız. Birden fazla sayfa ise tek bir dosya olarak yükleyiniz. (PDF/DOC/DOCX/IMG)";
     return "";
   };
 
   const handleFileChange = (e) => {
     const file = e.target.files?.[0];
-    if (file) setFormData((p) => ({ ...p, file, fileName: file.name }));
+    if (!file) return;
+
+    if (!isAllowedFile(file)) {
+      alert("Sadece JPG/PNG/WEBP veya PDF/DOC/DOCX yükleyebilirsiniz.");
+      return;
+    }
+
+    setFormData((p) => ({ ...p, file, fileName: file.name }));
   };
 
   const handleSubmit = (e) => {
@@ -1010,11 +875,17 @@ function ApplicationForm({ onSubmit, onBack }) {
             <label className="cursor-pointer flex flex-col items-center justify-center h-24 bg-white rounded-lg border border-slate-200 shadow-sm hover:bg-blue-50 text-center p-2">
               <Upload className="w-8 h-8 text-slate-400 mb-2" />
               <span className="text-sm text-slate-600 break-all">{formData.fileName || "Dosya Seçmek İçin Tıklayın"}</span>
-              <input required type="file" className="hidden" onChange={handleFileChange} />
+              <input
+                required
+                type="file"
+                className="hidden"
+                onChange={handleFileChange}
+                accept=".jpg,.jpeg,.png,.webp,.pdf,.doc,.docx"
+              />
             </label>
 
             <div className="mt-2 text-xs text-orange-600 flex items-center gap-1">
-              <ShieldCheck className="w-3 h-3" /> Dosyalar otomatik olarak Gemini AI ile analiz edilecektir.
+              <ShieldCheck className="w-3 h-3" /> Görseller Gemini ile analiz edilir. PDF/Word manuel kontroldedir.
             </div>
           </div>
 
@@ -1116,10 +987,7 @@ function Certificate({ data, onPrint, onNew }) {
       </div>
 
       <div className="w-full overflow-x-auto pb-4 flex justify-center">
-        <div
-          id="print-area"
-          className="relative w-[800px] min-w-[800px] aspect-[1.414] bg-white border-[12px] border-double border-blue-900 p-12 shadow-2xl text-center flex flex-col justify-between mx-auto"
-        >
+        <div id="print-area" className="relative w-[800px] min-w-[800px] aspect-[1.414] bg-white border-[12px] border-double border-blue-900 p-12 shadow-2xl text-center flex flex-col justify-between mx-auto">
           <div className="absolute inset-0 opacity-5 pointer-events-none flex items-center justify-center overflow-hidden">
             <img src={LOGO_URL} alt="Watermark" className="w-96 grayscale opacity-50" />
           </div>
@@ -1212,28 +1080,15 @@ function AdminLogin({ onLogin, onBack }) {
       <div className="space-y-4">
         <div>
           <label className="block text-sm font-bold text-slate-700">Kullanıcı Adı</label>
-          <input
-            type="text"
-            className="w-full p-2 border rounded outline-none focus:border-blue-500"
-            value={u}
-            onChange={(e) => setU(e.target.value)}
-          />
+          <input type="text" className="w-full p-2 border rounded outline-none focus:border-blue-500" value={u} onChange={(e) => setU(e.target.value)} />
         </div>
 
         <div>
           <label className="block text-sm font-bold text-slate-700">Şifre</label>
-          <input
-            type="password"
-            className="w-full p-2 border rounded outline-none focus:border-blue-500"
-            value={p}
-            onChange={(e) => setP(e.target.value)}
-          />
+          <input type="password" className="w-full p-2 border rounded outline-none focus:border-blue-500" value={p} onChange={(e) => setP(e.target.value)} />
         </div>
 
-        <button
-          onClick={() => onLogin(u, p)}
-          className="w-full bg-blue-900 text-white py-2 rounded font-bold hover:bg-blue-800 transition"
-        >
+        <button onClick={() => onLogin(u, p)} className="w-full bg-blue-900 text-white py-2 rounded font-bold hover:bg-blue-800 transition">
           Giriş Yap
         </button>
 
@@ -1289,17 +1144,11 @@ function AdminDashboard({ onLogout }) {
         </h2>
 
         <div className="flex gap-2">
-          <button
-            onClick={() => downloadCSV(filteredData)}
-            className="bg-green-600 hover:bg-green-700 px-3 py-2 rounded flex items-center gap-2 text-xs md:text-sm font-bold transition"
-          >
+          <button onClick={() => downloadCSV(filteredData)} className="bg-green-600 hover:bg-green-700 px-3 py-2 rounded flex items-center gap-2 text-xs md:text-sm font-bold transition">
             <Download size={16} /> <span className="hidden md:inline">Excel</span>
           </button>
 
-          <button
-            onClick={onLogout}
-            className="bg-red-600 hover:bg-red-700 px-3 py-2 rounded flex items-center gap-2 text-xs md:text-sm font-bold transition"
-          >
+          <button onClick={onLogout} className="bg-red-600 hover:bg-red-700 px-3 py-2 rounded flex items-center gap-2 text-xs md:text-sm font-bold transition">
             <LogOut size={16} /> <span className="hidden md:inline">Çıkış</span>
           </button>
         </div>
@@ -1341,9 +1190,7 @@ function AdminDashboard({ onLogout }) {
             {filteredData.map((sub) => (
               <tr key={sub.id} className="border-b hover:bg-slate-50 transition">
                 <td className="p-3 font-mono text-xs text-slate-500">{sub.validationId}</td>
-                <td className="p-3 font-bold text-slate-800">
-                  {sub.studentName} {sub.studentSurname}
-                </td>
+                <td className="p-3 font-bold text-slate-800">{sub.studentName} {sub.studentSurname}</td>
                 <td className="p-3">
                   <span
                     className={`px-2 py-1 rounded-full text-xs font-bold ${
@@ -1367,6 +1214,8 @@ function AdminDashboard({ onLogout }) {
                           ? "bg-red-500"
                           : String(sub.aiScore || "").includes("Temiz")
                           ? "bg-green-500"
+                          : String(sub.aiScore || "").includes("Kuyrukta")
+                          ? "bg-blue-500"
                           : "bg-yellow-500"
                       }`}
                     ></div>
