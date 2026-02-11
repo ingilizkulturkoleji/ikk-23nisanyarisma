@@ -3,18 +3,21 @@ import { initializeApp } from "firebase/app";
 import {
   getFirestore,
   collection,
-  addDoc,
   getDocs,
   query,
   orderBy,
-  where,
   serverTimestamp,
   doc,
   getDoc,
   setDoc,
 } from "firebase/firestore";
 import { getAuth, signInAnonymously, onAuthStateChanged } from "firebase/auth";
-import { getStorage, ref, uploadBytes, getDownloadURL } from "firebase/storage";
+import {
+  getStorage,
+  ref,
+  uploadBytesResumable,
+  getDownloadURL,
+} from "firebase/storage";
 
 import {
   Upload,
@@ -120,6 +123,93 @@ const getFileIcon = (name = "") => {
   if (["pdf", "doc", "docx", "txt"].includes(ext))
     return <FileText size={14} />;
   return <File size={14} />;
+};
+
+/* =========================
+   FAST UPLOAD HELPERS (NEW)
+========================= */
+const uploadFileWithProgress = (storageInstance, path, file, onProgress) =>
+  new Promise((resolve, reject) => {
+    const fileRef = ref(storageInstance, path);
+    const task = uploadBytesResumable(fileRef, file);
+
+    task.on(
+      "state_changed",
+      (snap) => {
+        const pct = snap.totalBytes
+          ? Math.round((snap.bytesTransferred / snap.totalBytes) * 100)
+          : 0;
+        onProgress?.(pct);
+      },
+      (err) => reject(err),
+      async () => {
+        const url = await getDownloadURL(task.snapshot.ref);
+        resolve(url);
+      }
+    );
+  });
+
+const readImageAsBitmapOrImage = async (file) => {
+  // createImageBitmap hızlı (çoğu tarayıcı), yoksa Image() fallback
+  if ("createImageBitmap" in window) {
+    return await createImageBitmap(file);
+  }
+  return await new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = URL.createObjectURL(file);
+  });
+};
+
+const compressImageIfNeeded = async (file) => {
+  // Sadece görselleri sıkıştır
+  if (!file?.type?.startsWith("image/")) return file;
+
+  // Çok küçükse uğraşma
+  const MAX_TARGET_BYTES = 1200 * 1024; // ~1.2MB hedef
+  if (file.size <= MAX_TARGET_BYTES) return file;
+
+  try {
+    const img = await readImageAsBitmapOrImage(file);
+
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+
+    const w = img.width || img.naturalWidth;
+    const h = img.height || img.naturalHeight;
+
+    // Maksimum genişlik/yükseklik sınırı
+    const MAX_DIM = 1800; // hız + kalite dengesi
+    const scale = Math.min(1, MAX_DIM / Math.max(w, h));
+    const nw = Math.round(w * scale);
+    const nh = Math.round(h * scale);
+
+    canvas.width = nw;
+    canvas.height = nh;
+
+    ctx.drawImage(img, 0, 0, nw, nh);
+
+    // JPEG’e çevirerek sıkıştır (png/heic vs -> jpeg olur, çok hızlanır)
+    const quality = 0.78;
+
+    const blob = await new Promise((resolve) =>
+      canvas.toBlob(resolve, "image/jpeg", quality)
+    );
+
+    if (!blob) return file;
+
+    const newFile = new File([blob], file.name.replace(/\.\w+$/, "") + ".jpg", {
+      type: "image/jpeg",
+    });
+
+    // Eğer gerçekten küçülmediyse eskiyi kullan
+    if (newFile.size >= file.size) return file;
+
+    return newFile;
+  } catch {
+    return file; // sıkıştırma başarısızsa orijinal
+  }
 };
 
 // Gemini: yalnızca resimler için
@@ -289,8 +379,6 @@ export default function IKKCompetitionApp() {
     }
 
     const phoneNorm = normalizePhone(formData.parentPhone);
-    const nameNorm = normalizeName(formData.studentName);
-    const surnameNorm = normalizeName(formData.studentSurname);
 
     setLoading(true);
     setLoadingMessage("Başvuru kontrol ediliyor...");
@@ -323,39 +411,63 @@ export default function IKKCompetitionApp() {
       }
     } catch (e) {
       console.error("Duplicate check error:", e);
-      // burada isterse durdurabilirsin
+      // burada istersen durdurabilirsin
     }
 
-    // Gemini
-    setLoadingMessage("Dosyanız analiz ediliyor (Gemini)...");
+    // Dosyayı hızlandır: görselleri sıkıştır
+    setLoadingMessage("Dosya hazırlanıyor (hızlandırma)...");
 
-    let aiScoreResult = "Analiz Bekleniyor";
-    try {
-      aiScoreResult = await analyzeWithGemini(formData.file);
-    } catch {
-      aiScoreResult = "Hata (Manuel)";
-    }
-
-    // Storage upload
-    setLoadingMessage("Dosya güvenli alana yükleniyor...");
-
-    let fileUrl = "";
-    let storagePath = "";
+    let fileToUpload = formData.file;
     let fileName = formData.file?.name || "";
     let fileType = formData.file?.type || "";
 
     try {
-      if (formData.file) {
+      const compressed = await compressImageIfNeeded(formData.file);
+      fileToUpload = compressed;
+      fileName = compressed?.name || fileName;
+      fileType = compressed?.type || fileType;
+    } catch {
+      // ignore
+    }
+
+    // Paralel: Gemini + Upload
+    setLoadingMessage("İşlem başlatılıyor...");
+
+    let aiScoreResult = "Analiz Bekleniyor";
+    let fileUrl = "";
+    let storagePath = "";
+
+    try {
+      if (fileToUpload) {
         const safeName = `${Date.now()}_${fileName}`.replace(/\s+/g, "_");
         storagePath = `submissions/${user.uid}/${safeName}`;
-        const fileRef = ref(storage, storagePath);
-        await uploadBytes(fileRef, formData.file);
-        fileUrl = await getDownloadURL(fileRef);
+
+        const uploadPromise = uploadFileWithProgress(
+          storage,
+          storagePath,
+          fileToUpload,
+          (pct) => {
+            setLoadingMessage(`Dosya yükleniyor... (%${pct})`);
+          }
+        );
+
+        const geminiPromise = analyzeWithGemini(fileToUpload);
+
+        const [uploadedUrl, geminiResult] = await Promise.all([
+          uploadPromise,
+          geminiPromise,
+        ]);
+
+        fileUrl = uploadedUrl;
+        aiScoreResult = geminiResult || "Analiz Edilemedi";
+      } else {
+        // dosya yoksa:
+        aiScoreResult = "Dosya Yok";
       }
     } catch (e) {
-      console.error("Storage upload error:", e);
+      console.error("Upload/Gemini error:", e);
       setLoading(false);
-      alert("Dosya yükleme sırasında hata oluştu. Lütfen tekrar deneyin.");
+      alert("Dosya yükleme veya analiz sırasında hata oluştu. Lütfen tekrar deneyin.");
       return;
     }
 
@@ -424,7 +536,10 @@ export default function IKKCompetitionApp() {
         return <ContactPage onBack={() => setView("landing")} />;
       case "adminLogin":
         return (
-          <AdminLogin onLogin={handleAdminLogin} onBack={() => setView("landing")} />
+          <AdminLogin
+            onLogin={handleAdminLogin}
+            onBack={() => setView("landing")}
+          />
         );
       case "adminDashboard":
         return (
